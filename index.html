@@ -814,12 +814,14 @@ function showDbError() {
 // GEOCODING — match city input to DB
 // ==========================================
 
-function findCity(input) {
+// ==========================================
+// GEOCODING — local fast-path + Nominatim fallback
+// ==========================================
+
+function findCityLocal(input) {
   const q = input.toLowerCase().trim();
-  // Try exact city name match first
   let match = CITY_DB.find(c => c.n.toLowerCase() === q);
   if (match) return match;
-  // Try "city, country" format
   const parts = q.split(',').map(s => s.trim());
   if (parts.length >= 2) {
     match = CITY_DB.find(c =>
@@ -827,18 +829,67 @@ function findCity(input) {
       c.c.toLowerCase().includes(parts[1])
     );
     if (match) return match;
-    // Try just country
     match = CITY_DB.find(c =>
       c.n.toLowerCase().includes(parts[0]) &&
       c.c.toLowerCase().includes(parts[1])
     );
     if (match) return match;
   }
-  // Partial city name match
   match = CITY_DB.find(c => c.n.toLowerCase().startsWith(q));
   if (match) return match;
   match = CITY_DB.find(c => c.n.toLowerCase().includes(q));
   return match || null;
+}
+
+async function findCity(input) {
+  // 1. Try local DB first (instant)
+  const local = findCityLocal(input);
+  if (local) return local;
+
+  // 2. Fall back to Nominatim (OpenStreetMap) — free, no key needed
+  try {
+    const encoded = encodeURIComponent(input);
+    const url = `https://nominatim.openstreetmap.org/search?q=${encoded}&format=json&limit=1&featuretype=city&addressdetails=1`;
+    const res = await fetch(url, {
+      headers: { 'Accept-Language': 'en', 'User-Agent': 'AstrocastGlobe/1.0' }
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data.length) return null;
+
+    const result = data[0];
+    const addr   = result.address || {};
+
+    // Extract best city name and country
+    const cityName = addr.city || addr.town || addr.village || addr.municipality || input;
+    const country  = addr.country || '';
+
+    // Derive timezone from coordinates using the browser's Intl API via a best-effort lookup
+    const lat = parseFloat(result.lat);
+    const lng = parseFloat(result.lon);
+    const tz  = await guessTimezone(lat, lng);
+
+    return { n: cityName, c: country, lat, lng, tz };
+  } catch(e) {
+    console.error('Nominatim error:', e);
+    return null;
+  }
+}
+
+async function guessTimezone(lat, lng) {
+  // Use the free timeapi.io to get timezone from coordinates
+  try {
+    const res = await fetch(`https://timeapi.io/api/timezone/coordinate?latitude=${lat}&longitude=${lng}`);
+    if (!res.ok) throw new Error('bad response');
+    const data = await res.json();
+    return data.timeZone || 'UTC';
+  } catch(e) {
+    // Rough offset-based fallback — better than nothing
+    const offset = Math.round(lng / 15);
+    const sign   = offset >= 0 ? '+' : '-';
+    const abs    = Math.abs(offset).toString().padStart(2, '0');
+    return `Etc/GMT${offset === 0 ? '' : sign + abs}`;
+  }
 }
 
 function getLocalTime(tz) {
@@ -1287,11 +1338,21 @@ async function addMember() {
     showMsg(msgEl, 'That name is already on the globe!', 'error'); return;
   }
 
-  const city = findCity(cityInput);
+  // Disable button while looking up city + saving
+  btn.disabled = true;
+  btn.textContent = '⏳ LOOKING UP...';
+  showMsg(msgEl, '', '');
+
+  const city = await findCity(cityInput);
   if (!city) {
-    showMsg(msgEl, `Couldn't find "${cityInput}". Try "City, Country" format.`, 'error');
+    btn.disabled = false;
+    btn.textContent = '⊕ ADD TO GLOBE';
+    showMsg(msgEl, `Couldn't find "${cityInput}". Try adding the country, e.g. "Orlando, USA".`, 'error');
     return;
   }
+
+  btn.textContent = '⏳ SAVING...';
+  showMsg(msgEl, '', '');
 
   const color = MEMBER_COLORS[memberColorIndex % MEMBER_COLORS.length];
   memberColorIndex++;
@@ -1306,11 +1367,6 @@ async function addMember() {
     color,
     added: Date.now()
   };
-
-  // Disable button while saving
-  btn.disabled = true;
-  btn.textContent = '⏳ SAVING...';
-  showMsg(msgEl, '', '');
 
   const key = await saveMember(member);
   btn.disabled = false;
