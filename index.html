@@ -547,6 +547,10 @@
           <label>City & Country</label>
           <input type="text" id="new-city" placeholder="e.g. Tokyo, Japan..." maxlength="50">
         </div>
+        <div class="form-group">
+          <label>Crew Password</label>
+          <input type="password" id="new-password" placeholder="Ask your host for the password" maxlength="50">
+        </div>
         <button class="btn btn-primary" onclick="addMember()">⊕ ADD TO GLOBE</button>
         <div class="msg" id="add-msg"></div>
       </div>
@@ -561,12 +565,39 @@
   </div>
 </div>
 
-<script>
+<!-- Firebase SDK -->
+<script type="module">
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+import { getDatabase, ref, get, set, push, remove, child } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js';
+
+// ==========================================
+// !! FIREBASE CONFIG — PASTE YOUR VALUES HERE !!
+// Get these from: Firebase Console → Your Project
+// → Project Settings → Your Apps → SDK setup and configuration
+// ==========================================
+const FIREBASE_CONFIG = {
+  apiKey:            "AIzaSyCoM64P7f4UEbtg932_FLXahA81Lh-fRnE",
+  authDomain:        "ac-globe.firebaseapp.com",
+  databaseURL:       "https://ac-globe-default-rtdb.firebaseio.com",
+  projectId:         "ac-globe",
+  storageBucket:     "ac-globe.firebasestorage.app",
+  messagingSenderId: "279022853154",
+  appId:             "1:279022853154:web:3e9839e559dec5a706be7b"
+};
+
+// ==========================================
+// !! SHARED PASSWORD — CHANGE THIS !!
+// All crew members need this to add or remove entries.
+// ==========================================
+const CREW_PASSWORD = "captain2025";
+
 // ==========================================
 // DATA & STATE
 // ==========================================
 
-const STORAGE_KEY = 'astrocast_crew_v2';
+const app = initializeApp(FIREBASE_CONFIG);
+const db  = getDatabase(app);
+const CREW_REF = 'crew';
 
 // City geo + timezone database — common cities
 const CITY_DB = [
@@ -731,18 +762,52 @@ let canvasW, canvasH;
 let memberColorIndex = 0;
 
 // ==========================================
-// STORAGE
+// STORAGE — Firebase Realtime Database
 // ==========================================
 
-function loadMembers() {
+async function loadMembers() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) members = JSON.parse(raw);
-  } catch(e) { members = []; }
+    const snapshot = await get(ref(db, CREW_REF));
+    if (snapshot.exists()) {
+      const data = snapshot.val();
+      members = Object.entries(data).map(([key, val]) => ({ ...val, _key: key }));
+      members.sort((a, b) => (a.added || 0) - (b.added || 0));
+      memberColorIndex = members.length;
+    } else {
+      members = [];
+    }
+  } catch(e) {
+    console.error('Firebase load error:', e);
+    showDbError();
+    members = [];
+  }
 }
 
-function saveMembers() {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(members)); } catch(e) {}
+async function saveMember(member) {
+  try {
+    const newRef = push(ref(db, CREW_REF));
+    const { _key, ...data } = member;
+    await set(newRef, data);
+    return newRef.key;
+  } catch(e) {
+    console.error('Firebase save error:', e);
+    showDbError();
+    return null;
+  }
+}
+
+async function deleteMember(key) {
+  try {
+    await remove(ref(db, `${CREW_REF}/${key}`));
+  } catch(e) {
+    console.error('Firebase delete error:', e);
+    showDbError();
+  }
+}
+
+function showDbError() {
+  const msgEl = document.getElementById('add-msg');
+  if (msgEl) showMsg(msgEl, '⚠ Database error — check Firebase config.', 'error');
 }
 
 // ==========================================
@@ -1200,15 +1265,24 @@ function escHtml(s) {
 // ==========================================
 
 async function addMember() {
-  const nameEl = document.getElementById('new-name');
-  const cityEl = document.getElementById('new-city');
-  const msgEl = document.getElementById('add-msg');
+  const nameEl   = document.getElementById('new-name');
+  const cityEl   = document.getElementById('new-city');
+  const passEl   = document.getElementById('new-password');
+  const msgEl    = document.getElementById('add-msg');
+  const btn      = document.querySelector('.btn-primary');
 
-  const name = nameEl.value.trim();
+  const name      = nameEl.value.trim();
   const cityInput = cityEl.value.trim();
+  const password  = passEl.value;
 
-  if (!name) { showMsg(msgEl, 'Enter your name or handle.', 'error'); return; }
+  if (!name)      { showMsg(msgEl, 'Enter your name or handle.', 'error'); return; }
   if (!cityInput) { showMsg(msgEl, 'Enter your city.', 'error'); return; }
+  if (!password)  { showMsg(msgEl, 'Enter the crew password.', 'error'); return; }
+  if (password !== CREW_PASSWORD) {
+    showMsg(msgEl, '✕ Wrong password — ask your host.', 'error');
+    passEl.value = '';
+    return;
+  }
   if (members.find(m => m.name.toLowerCase() === name.toLowerCase())) {
     showMsg(msgEl, 'That name is already on the globe!', 'error'); return;
   }
@@ -1233,27 +1307,52 @@ async function addMember() {
     added: Date.now()
   };
 
+  // Disable button while saving
+  btn.disabled = true;
+  btn.textContent = '⏳ SAVING...';
+  showMsg(msgEl, '', '');
+
+  const key = await saveMember(member);
+  btn.disabled = false;
+  btn.textContent = '⊕ ADD TO GLOBE';
+
+  if (!key) return; // error already shown by saveMember
+
+  member._key = key;
   members.push(member);
-  saveMembers();
   renderCrewList();
 
   nameEl.value = '';
   cityEl.value = '';
+  passEl.value = '';
   showMsg(msgEl, `✓ ${name} added to the globe!`, 'success');
 
-  // Highlight newly added
   highlightedMember = member;
   highlightCrewItem(member);
   scrollToCrewItem(member);
 }
 
-function removeMember(i) {
-  if (highlightedMember === members[i]) {
+async function removeMember(i) {
+  const member = members[i];
+  const pw = prompt(`Enter the crew password to remove "${member.name}":`, '');
+  if (pw === null) return; // cancelled
+  if (pw !== CREW_PASSWORD) {
+    alert('✕ Wrong password — entry not removed.');
+    return;
+  }
+
+  if (!member._key) {
+    alert('Cannot remove this entry (missing database key). Try refreshing the page.');
+    return;
+  }
+
+  await deleteMember(member._key);
+
+  if (highlightedMember === member) {
     highlightedMember = null;
     hideTooltip();
   }
   members.splice(i, 1);
-  saveMembers();
   renderCrewList();
 }
 
@@ -1325,10 +1424,13 @@ searchInput.addEventListener('keydown', e => {
 });
 
 document.getElementById('new-city').addEventListener('keydown', e => {
-  if (e.key === 'Enter') addMember();
+  if (e.key === 'Enter') document.getElementById('new-password').focus();
 });
 document.getElementById('new-name').addEventListener('keydown', e => {
   if (e.key === 'Enter') document.getElementById('new-city').focus();
+});
+document.getElementById('new-password').addEventListener('keydown', e => {
+  if (e.key === 'Enter') addMember();
 });
 
 // ==========================================
@@ -1370,35 +1472,20 @@ function loop(ts) {
 }
 
 // ==========================================
-// SEED DATA (example crew for demo)
-// ==========================================
-
-function addSeedData() {
-  if (members.length > 0) return;
-  const seeds = [
-    { name: 'Mission Ctrl', city: 'London', country: 'UK', lat: 51.51, lng: -0.13, tz: 'Europe/London', color: '#00f5ff' },
-    { name: 'CosmicJay', city: 'Tokyo', country: 'Japan', lat: 35.69, lng: 139.69, tz: 'Asia/Tokyo', color: '#ff006e' },
-    { name: 'StarCaster', city: 'Sydney', country: 'Australia', lat: -33.87, lng: 151.21, tz: 'Australia/Sydney', color: '#ffd60a' },
-    { name: 'NebulaMike', city: 'New York', country: 'USA', lat: 40.71, lng: -74.01, tz: 'America/New_York', color: '#a8ff78' },
-  ];
-  members = seeds.map(s => ({ ...s, added: Date.now() }));
-  memberColorIndex = seeds.length;
-  saveMembers();
-}
-
-// ==========================================
 // INIT
 // ==========================================
 
-window.addEventListener('load', () => {
+window.addEventListener('load', async () => {
   canvas = document.getElementById('globe-canvas');
   ctx = canvas.getContext('2d');
   tooltip = document.getElementById('tooltip');
 
   attachCanvasListeners();
 
-  loadMembers();
-  addSeedData();
+  // Show loading state while fetching from Firebase
+  const loading = document.getElementById('loading');
+
+  await loadMembers();
   resizeCanvas();
   renderCrewList();
 
@@ -1409,7 +1496,6 @@ window.addEventListener('load', () => {
     requestAnimationFrame(loop);
 
     // Hide loading overlay
-    const loading = document.getElementById('loading');
     setTimeout(() => {
       loading.style.opacity = '0';
       setTimeout(() => loading.remove(), 500);
