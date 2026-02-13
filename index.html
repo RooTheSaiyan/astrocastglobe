@@ -589,7 +589,7 @@ const FIREBASE_CONFIG = {
 // !! SHARED PASSWORD — CHANGE THIS !!
 // All crew members need this to add or remove entries.
 // ==========================================
-const CREW_PASSWORD = "captain2025";
+const CREW_PASSWORD = "Captain2025";
 
 // ==========================================
 // DATA & STATE
@@ -1508,6 +1508,13 @@ window.addEventListener('load', async () => {
     if (mapImage && mapImage.complete) drawGlobe(new Date());
   });
 });
+
+// Expose functions called by inline onclick handlers to the global scope
+// (required because this script runs as type="module")
+window.addMember          = addMember;
+window.removeMember       = removeMember;
+window.focusMember        = focusMember;
+window.selectSearchResult = selectSearchResult;
 </script>
 </body>
 </html>
